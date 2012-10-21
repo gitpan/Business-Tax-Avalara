@@ -1,5 +1,7 @@
 package Business::Tax::Avalara;
 
+use 5.010;
+
 use strict;
 use warnings;
 
@@ -65,11 +67,11 @@ This module only supports the 'get_tax' method at the moment.
 
 =head1 VERSION
 
-Version 1.0.0
+Version 1.0.1
 
 =cut
 
-our $VERSION = '1.0.0';
+our $VERSION = '1.0.1';
 our $AVALARA_REQUEST_SERVER = 'rest.avalara.net';
 our $AVALARA_DEVELOPMENT_REQUEST_SERVER = 'development.avalara.net';
 
@@ -420,7 +422,7 @@ sub _generate_cart_line_json
 	(
 		'item_code'           => 'ItemCode',
 		'sku'                 => 'ItemCode', # Use sku OR item_code
-		'tax_code'            => 'TaxCode', # TODO: Give some interface for this
+		'tax_code'            => 'TaxCode',
 		'customer_usage_type' => 'CustomerUsageType',
 		'description'         => 'Description',
 		'quantity'            => 'Qty',
