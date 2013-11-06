@@ -25,6 +25,10 @@ ok(
 	'Create a new Business::Tax::Avalara object.',
 ) || diag( explain( $avalara_gateway ) );
 
+# Create a unique doc_code
+my $doc_code = time();
+
+# First we need to create a tax lookup, so we can cancel it later.
 my %lookup_data = (
 	destination_address =>
 		{
@@ -49,8 +53,9 @@ my %lookup_data = (
 				line_number => 4,
 			}
 		],
-	commit => 1,
-	document_code => 666,
+	commit        => 1,
+	document_code => $doc_code,
+	document_type => 'SalesInvoice',
 );
 
 ok (
@@ -70,17 +75,18 @@ is (
 	'Total Tax is correct.'
 );
 
-my %cart_line_tax =
-(
-	'3' => 0.54,
-	'4' => 2.34,
+# Now we need to cancel it.
+ok(
+	$response = $avalara_gateway->cancel_tax(
+		document_type => 'SalesInvoice',
+		doc_code      => $doc_code,
+		cancel_code   => 'DocVoided',
+	),
+	'Sent request to cancel tax.'
 );
 
-foreach my $cart_line_id ( keys %{ $response->{'TaxLines'} } )
-{
-	is (
-		$response->{'TaxLines'}->{ $cart_line_id }->{'Tax'},
-		$cart_line_tax{ $cart_line_id },
-		"Tax is correct for line $cart_line_id.",
-	);
-}
+is(
+	$response->{'CancelTaxResult'}->{'ResultCode'},
+	'Success',
+	'Tax was canceled.'
+);

@@ -67,11 +67,11 @@ This module only supports the 'get_tax' method at the moment.
 
 =head1 VERSION
 
-Version 1.0.6
+Version 1.1.0
 
 =cut
 
-our $VERSION = '1.0.6';
+our $VERSION = '1.1.0';
 our $AVALARA_REQUEST_SERVER = 'rest.avalara.net';
 our $AVALARA_DEVELOPMENT_REQUEST_SERVER = 'development.avalara.net';
 
@@ -92,6 +92,7 @@ between requests.
 		origin_address  => $origin_address (optional),
 		memcached       => A Cache::Memcached or Cache::Memcached::Fast object.
 		request_timeout => Request timeout in seconds. Default is 3.
+		debug           => 0,
 	);
 	
 The fields customer_code, company_code, user_name, and password should be
@@ -108,6 +109,9 @@ It is a hash ref, see below for formatting details.
 If a memcached object is passed in, we can use this so that we don't send the same
 request over in a certain period of time. This combines below with 'cache_timespan'
 and 'unique_key' in the get_tax() call.
+
+If debug is set to a true value, it will dump out the raw json messages being sent to
+and coming back from Avalara.
 
 Returns a Business::Tax::Avalara object.
 
@@ -134,6 +138,7 @@ sub new
 		password        => $args{'password'},
 		origin_address  => $args{'origin_address'},
 		request_timeout => $args{'request_timeout'} // 3,
+		debug           => $args{'debug'} // 0,
 	};
 	
 	bless $self, $class;
@@ -161,7 +166,8 @@ Makes a JSON request using the 'get_tax' method, parses the response, and return
 		reference_code        => $reference_code (optional),
 		commit                => 1|0, # Default 0, whether this is a 'final' query.
 		unique_key            => A unique key for memcache (optional, see below)
-		cache_timespan        => The number of seconds to cache results (see below)
+		cache_timespan        => The number of seconds to cache results (see below),
+		doc_code              => Unique document code (optional),
 	);
 
 See below for the definitions of address and cart_line fields. The field origin_address
@@ -260,6 +266,78 @@ sub get_tax
 }
 
 
+=head2 cancel_tax()
+
+Makes a JSON request using the 'cancel_tax' method, parses the response, and returns a perl hash.
+
+	my $tax_results = $avalara_gateway->cancel_tax(
+		document_type => $document_type, default 'SalesOrder'
+		doc_code      => $doc_code,
+		cancel_code   => $cancel_code, default 'DocVoided',
+		doc_id        => $doc_id,
+	);
+
+Either doc_id (which is Avalara's transaction ID returned from get_tax() )
+or the combination of document_type, doc_coe, and doc_id are required.
+
+Returns a perl hashref based on the Avalara return.
+See the Avalara documentation for the full description of the output, but the highlights are:
+
+	'CancelTaxResult' =>
+	{
+		ResultCode    => 'Success',
+		DocID         => SomeDocID,
+		TransactionID => Avalara's ID,
+	}
+
+=cut
+
+sub cancel_tax
+{
+	my ( $self, %args ) = @_;
+	
+	my $document_type = delete $args{'document_type'} // 'SalesOrder';
+	my $doc_code = delete $args{'doc_code'};
+	my $cancel_code = delete $args{'cancel_code'} // 'DocVoided';
+	my $doc_id = delete $args{'doc_id'};
+	
+	# We need either doc_id or doc_code and document_type and cancel_code.
+	# But there are defaults on document_type and cancel type, so really
+	# we just need doc_id or doc_code.
+	if ( !defined $doc_id && !defined $doc_code )
+	{
+		carp( "Either a doc_id, or the combination of doc_code, cancel_code, and document_type is required." );
+		return undef;
+	}
+
+	my %request;
+	if ( defined $doc_id )
+	{
+		$request{'doc_id'} = $doc_id;
+	}
+	else
+	{
+		$request{'document_type'} = $document_type;
+		$request{'doc_code'} = $doc_code;
+		$request{'cancel_code'} = $cancel_code;
+	}
+	
+	my $cancel_output = try
+	{
+		my $request_json = $self->_generate_cancel_request_json( %request );
+		my $result_json = $self->_make_request_json( $request_json, 'cancel' );
+		return $self->_parse_response_json( $result_json );
+	}
+	catch
+	{
+		carp( "Failed to cancel Avalara tax record: ", $_ );
+		return undef;
+	};
+
+	return $cancel_output;
+}
+
+
 =head1 INTERNAL FUNCTIONS
 
 =head2 _generate_request_json()
@@ -320,6 +398,42 @@ sub _generate_request_json
 		$request->{ $optional_nodes{ $node_name } } = $args{ $node_name };
 	}
 	
+	my $json = JSON::PP->new()->ascii()->pretty()->allow_nonref();
+	return $json->encode( $request );
+}
+
+
+=head2 _generate_cancel_request_json()
+
+Generates the json to cancel a tax request to Avalara's web service.
+
+Returns a JSON object.
+
+=cut
+
+sub _generate_cancel_request_json
+{
+	my ( $self, %args ) = @_;
+	
+	my $request =
+	{
+		CompanyCode => $self->{'company_code'},
+	};
+	
+	my %optional_nodes =
+	(
+		document_type => 'DocType',
+		doc_code      => 'DocCode',
+		cancel_code   => 'CancelCode',
+		doc_id        => 'DocId',
+	);
+	
+	foreach my $node_name ( keys %optional_nodes )
+	{
+		next if ( !defined $args{ $node_name } );
+		$request->{ $optional_nodes{ $node_name } } = $args{ $node_name };
+	}
+
 	my $json = JSON::PP->new()->ascii()->pretty()->allow_nonref();
 	return $json->encode( $request );
 }
@@ -460,12 +574,14 @@ Makes the https request to Avalara, and returns the response json.
 
 sub _make_request_json
 {
-	my ( $self, $request_json ) = @_;
+	my ( $self, $request_json, $resource ) = @_;
 		
+	$resource //= 'get';
+	
 	my $request_server = $self->{'is_development'}
 		? $AVALARA_DEVELOPMENT_REQUEST_SERVER
 		: $AVALARA_REQUEST_SERVER;
-	my $request_url = 'https://' . $request_server . '/1.0/tax/get';
+	my $request_url = 'https://' . $request_server . '/1.0/tax/' . $resource;
 	
 	# Create a user agent object
 	my $user_agent = LWP::UserAgent->new();
@@ -486,9 +602,19 @@ sub _make_request_json
 	$request->content( $request_json );
 	$request->header( content_length => length( $request_json ) );
 	
+	if ( $self->{'debug'} )
+	{
+		carp( 'Request to Avalara: ', Data::Dump::dump( $request->content() ) );
+	}
+	
 	# Pass request to the user agent and get a response back
 	my $response = $user_agent->request( $request );
 	
+	if ( $self->{'debug'} )
+	{
+		carp( 'Response from Avalara: ', Data::Dump::dump( $response->content() ) );
+	}
+
 	# Check the outcome of the response
 	if ( $response->is_success() )
 	{
@@ -499,7 +625,8 @@ sub _make_request_json
 		carp $response->status_line();
 		carp $request->as_string();
 		carp $response->as_string();
-		croak "Failed to fetch JSON response: " . $response->status_line() . "\n";
+		carp "Failed to fetch JSON response: " . $response->status_line() . "\n";
+		return $response->content();
 	}
 	
 	return;
